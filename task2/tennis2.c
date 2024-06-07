@@ -1,5 +1,5 @@
 
-#include "tennis1.h"
+#include "tennis2.h"
 
 /* variables globals */
 int n_fil, n_col, m_por;	/* dimensions del taulell i porteries */
@@ -22,6 +22,13 @@ int cont;
 int tecla;
 
 int final_juego;
+
+pthread_mutex_t ventana_control = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t moviments_control = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t pause_control = PTHREAD_MUTEX_INITIALIZER;
+
+int min;
+int sec;
 
 /* funcio per realitzar la carrega dels parametres de joc emmagatzemats */
 /* dins un fitxer de text, el nom del qual es passa per referencia en   */
@@ -76,7 +83,7 @@ void carrega_parametres(const char *nom_fit)
 
 	num_pal = 0;
 	// Carga paletas ordenador:
-	while(!feof(fit) && (num_pal < MAX_PAL))
+	while(!feof(fit))
 	{
 		fscanf(fit,"%d %d %f %f\n", &paletes[num_pal].ipo_pf, &paletes[num_pal].ipo_pc, &paletes[num_pal].v_pal, &paletes[num_pal].pal_ret);
 
@@ -86,7 +93,6 @@ void carrega_parametres(const char *nom_fit)
 		(paletes[num_pal].pal_ret < MIN_RET) || (paletes[num_pal].pal_ret > MAX_RET))
 		{
 			fprintf(stderr,"Error: parametres paleta ordinador incorrectes:\n");
-			paletes[num_pal].id = num_pal;
 			fprintf(stderr,"\t1 =< ipo_pf (%d) =< n_fil-l_pal-3 (%d)\n",paletes[num_pal].ipo_pf,(n_fil-l_pal-3));
 			fprintf(stderr,"\t5 =< ipo_pc (%d) =< n_col-2 (%d)\n",paletes[num_pal].ipo_pc,(n_col-2));
 			fprintf(stderr,"\t%.1f =< v_pal (%.1f) =< %.1f\n",MIN_VEL,paletes[num_pal].v_pal,MAX_VEL);
@@ -95,24 +101,9 @@ void carrega_parametres(const char *nom_fit)
 			fclose(fit);
 			exit(5);
 		}
+		paletes[num_pal].id = num_pal + 1 + '0';
 		num_pal++;
 	}
-	/*
-	if (!feof(fit)) fscanf(fit,"%d %d %f %f\n",&ipo_pf,&ipo_pc,&v_pal,&pal_ret);
-	if ((ipo_pf < 1) || (ipo_pf+l_pal > n_fil-2) ||
-		(ipo_pc < 5) || (ipo_pc > n_col-2) ||
-		(v_pal < MIN_VEL) || (v_pal > MAX_VEL) ||
-		(pal_ret < MIN_RET) || (pal_ret > MAX_RET))
-		{
-		fprintf(stderr,"Error: parametres paleta ordinador incorrectes:\n");
-		fprintf(stderr,"\t1 =< ipo_pf (%d) =< n_fil-l_pal-3 (%d)\n",ipo_pf,(n_fil-l_pal-3));
-		fprintf(stderr,"\t5 =< ipo_pc (%d) =< n_col-2 (%d)\n",ipo_pc,(n_col-2));
-		fprintf(stderr,"\t%.1f =< v_pal (%.1f) =< %.1f\n",MIN_VEL,v_pal,MAX_VEL);
-		fprintf(stderr,"\t%.1f =< pal_ret (%.1f) =< %.1f\n",MIN_RET,pal_ret,MAX_RET);
-		fclose(fit);
-		exit(5);
-		}
-	*/
 	fclose(fit);			/* fitxer carregat: tot OK! */
 }
 
@@ -121,7 +112,7 @@ void carrega_parametres(const char *nom_fit)
 int inicialitza_joc(void)
 {
 	int i, i_port, f_port, retwin;
-	char strin[51];
+	char strin[100];
 
 	retwin = win_ini(&n_fil,&n_col,'+',INVERS);   /* intenta crear taulell */
 
@@ -158,16 +149,20 @@ int inicialitza_joc(void)
 	for (i=0; i< l_pal; i++)	    /* dibuixar paleta inicialment */
 	{
 		win_escricar(ipu_pf + i, ipu_pc, '0', INVERS);
-		for (int j = 0; j < num_pal; j++)
-			win_escricar(paletes[j].ipo_pf + i, paletes[j].ipo_pc, paletes[i].id, INVERS); 
+		for (int j = 0; j < num_pal; j++) {
+			win_escricar(paletes[j].ipo_pf + i, paletes[j].ipo_pc, paletes[j].id, INVERS);
+		}
 	}
-	paletes[i].po_pf = paletes[i].ipo_pf;		/* fixar valor real paleta ordinador */
+
+	for (int x = 0; x < num_pal; x++) {
+		paletes[x].po_pf = paletes[x].ipo_pf;		/* fixar valor real paleta ordinador */ 
+	}
+	
 
 	pil_pf = ipil_pf; pil_pc = ipil_pc;	/* fixar valor real posicio pilota */
 	win_escricar(ipil_pf, ipil_pc, '.',INVERS);	/* dibuix inicial pilota */
 
-	sprintf(strin,"Tecles: \'%c\'-> amunt, \'%c\'-> avall, RETURN-> sortir.",
-			TEC_AMUNT, TEC_AVALL);
+	sprintf(strin,"Time (%.2d min:%.2d sec) - N movimientos (%d)", min, sec, moviments);
 	win_escristr(strin);
 	return(0);
 }
@@ -175,8 +170,9 @@ int inicialitza_joc(void)
 /* programa principal				    */
 int main(int n_args, const char *ll_args[])
 {
-	int i;
+	int i, moviment_total;
 	pthread_t hilo_usuario, hilo_ordenador[MAX_PAL], hilo_pelota, hilo_reloj;
+	char	strin[100];
 
 	if ((n_args != 3) && (n_args !=4))
 	{
@@ -184,35 +180,67 @@ int main(int n_args, const char *ll_args[])
 		exit(1);
 	}
 	carrega_parametres(ll_args[1]);
-	moviments=atoi(ll_args[2]);
+	moviments = atoi(ll_args[2]);
+
+	moviment_total = moviments;
 
 	if (n_args == 4) retard = atoi(ll_args[3]);
 	else retard = 100;
 
+	min = 0;
+	sec = 0;
 	if (inicialitza_joc() !=0)    /* intenta crear el taulell de joc */
 		exit(4);   /* aborta si hi ha algun problema amb taulell */
+
+	pthread_mutex_init(&ventana_control, NULL);
+	pthread_mutex_init(&moviments_control, NULL);
+	pthread_mutex_init(&pause_control, NULL);
 
 	final_juego = 0;
 	cont = -1;
 	pthread_create(&hilo_usuario, NULL, mou_paleta_usuario_control, NULL); // Hilo paleta usuari
+	pthread_create(&hilo_pelota, NULL, mou_pilota_control, NULL); // Hilo pelota
+	pthread_create(&hilo_reloj, NULL, reloj_control, NULL); // Hilo pelota
 	for (i = 0; i < num_pal; i++)
 		pthread_create(&hilo_ordenador[i], NULL, mou_paleta_ordinador_control, (void*)(intptr_t) i); // Hilo paleta ordenador
-	pthread_create(&hilo_pelota, NULL, mou_pilota_control, NULL); // Hilo pelota
-	//pthread_create(&hilo_reloj, NULL, moure_pilota, NULL); // Hilo pelota
 
 	/********** bucle principal del joc **********/
-	while ((tecla != TEC_RETURN) && (cont == -1) && ((moviments > 0) || moviments == -1));
+	while ((tecla != TEC_RETURN) && (cont == -1) && ((moviments > 0) || moviments == -1))
+	{
+		sprintf(strin,"Time (%.2d min:%.2d sec) Mov (%d)/(%d)", min, sec, moviments, moviment_total);
+
+		pthread_mutex_lock(&ventana_control);
+		win_escristr(strin);
+		pthread_mutex_unlock(&ventana_control);
+	}
 
 	final_juego = 1;
 	pthread_join(hilo_usuario, NULL);
+	pthread_join(hilo_pelota, NULL);
+	pthread_join(hilo_reloj, NULL);
 	for (i = 0; i < num_pal; i++)
 		pthread_join(hilo_ordenador[i], NULL); // Hilo paleta ordenador
-	pthread_join(hilo_pelota, NULL);
 
+	pthread_mutex_destroy(&ventana_control);
+	pthread_mutex_destroy(&moviments_control);
+	pthread_mutex_destroy(&pause_control);
 	win_fi();
 
-	if (tecla == TEC_RETURN) printf("S'ha aturat el joc amb la tecla RETURN!\n");
-	else { if (cont == 0 || moviments == 0) printf("Ha guanyat l'ordinador!\n");
-			else printf("Ha guanyat l'usuari!\n"); }
+	printf("Tiempo: %d min: %d sec\n", min, sec);
+	printf("Motivo fin de juego: ");
+	if (tecla == TEC_RETURN) {
+		printf("S'ha aturat el joc amb la tecla RETURN!\n");
+	}
+	else { 
+		if (cont == 0 || moviments == 0) {
+			if (moviments == 0) {
+				printf("Ha guanyat l'ordinador!, te has quedado sin movimientos\n");
+			} else {
+				printf("Ha guanyat l'ordinador!\n");
+			}
+		} else {
+			printf("Ha guanyat l'usuari!\n"); 
+		}
+	}
 	return(0);
 }
